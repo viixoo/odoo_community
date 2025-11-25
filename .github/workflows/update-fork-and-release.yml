@@ -48,10 +48,11 @@ jobs:
       max-parallel: 3    # Process all branches in parallel
     
     steps:
-      - name: Checkout repository
+      - name: Checkout repository (shallow clone)
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          ref: ${{ matrix.branch }}
+          fetch-depth: 1  # Only fetch the latest commit for the specific branch
           token: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Configure Git
@@ -59,14 +60,15 @@ jobs:
           git config user.name "github-actions[bot]"
           git config user.email "github-actions[bot]@users.noreply.github.com"
 
-      - name: Add upstream remote
+      - name: Add upstream remote and fetch specific branch
         run: |
           if ! git remote | grep -q upstream; then
             git remote add upstream https://github.com/odoo/odoo.git
           else
             git remote set-url upstream https://github.com/odoo/odoo.git
           fi
-          git fetch upstream
+          # Only fetch the specific branch we need from upstream (shallow)
+          git fetch upstream ${{ matrix.branch }} --depth=1
 
       - name: Update branch and create release
         env:
@@ -76,17 +78,22 @@ jobs:
           echo "Processing branch: $BRANCH"
           IS_MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
           
-          # Checkout the branch
-          git checkout $BRANCH 2>/dev/null || git checkout -b $BRANCH origin/$BRANCH 2>/dev/null || {
+          # We're already on the correct branch from checkout step
+          # Ensure we're on the branch (should already be there)
+          git checkout $BRANCH || {
             echo "Error: Could not checkout branch $BRANCH"
             exit 1
           }
           
-          # Pull latest from upstream
-          git fetch upstream $BRANCH 2>/dev/null || {
+          # Fetch latest from origin for the branch (shallow, just in case)
+          git fetch origin $BRANCH --depth=1 2>/dev/null || true
+          
+          # Upstream branch was already fetched in previous step
+          # Verify it exists
+          if ! git rev-parse upstream/$BRANCH >/dev/null 2>&1; then
             echo "Error: Branch $BRANCH not found in upstream"
             exit 1
-          }
+          fi
           
           # Check if there are updates
           UPSTREAM_COMMIT=$(git rev-parse upstream/$BRANCH 2>/dev/null || echo "")
@@ -102,8 +109,8 @@ jobs:
           if [ "$UPSTREAM_COMMIT" != "$CURRENT_COMMIT" ]; then
             echo "Updating branch $BRANCH from upstream..."
             
-            # Merge upstream changes
-            if git merge upstream/$BRANCH --no-edit; then
+            # Try to merge upstream changes (works for fast-forward merges with shallow clone)
+            if git merge upstream/$BRANCH --no-edit 2>&1; then
               # Push updated branch
               if git push origin $BRANCH; then
                 BRANCH_UPDATED=true
@@ -113,7 +120,9 @@ jobs:
                 exit 1
               fi
             else
-              echo "Merge conflict detected, resetting to upstream..."
+              # Merge failed - could be due to shallow history or conflicts
+              # Reset to upstream (doesn't require full history)
+              echo "Merge failed, resetting to upstream..."
               git merge --abort 2>/dev/null || true
               git reset --hard upstream/$BRANCH
               if git push origin $BRANCH --force; then
@@ -156,11 +165,12 @@ jobs:
             exit 0
           fi
           
-          # Check if tag already exists
-          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+          # Check if tag already exists (check remote since we have shallow clone)
+          if git ls-remote --tags origin "$RELEASE_TAG" | grep -q "$RELEASE_TAG"; then
             echo "Tag $RELEASE_TAG already exists, skipping release creation"
           else
             # Create tag and release
+            # Tags only need the current commit, shallow clone is fine
             git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
             git push origin "$RELEASE_TAG"
             
