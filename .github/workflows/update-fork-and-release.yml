@@ -164,10 +164,39 @@ jobs:
             git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
             git push origin "$RELEASE_TAG"
             
-            gh release create "$RELEASE_TAG" \
-              --title "$RELEASE_NAME" \
-              --notes "$RELEASE_NOTES" \
-              --target $BRANCH || echo "Release creation failed or already exists"
+            # Create release in the fork repository using GitHub API
+            # Get the repository name from GITHUB_REPOSITORY (format: owner/repo)
+            REPO="${{ github.repository }}"
             
-            echo "Successfully created release $RELEASE_TAG for branch $BRANCH"
+            # Properly escape JSON using Python
+            ESCAPED_NOTES=$(echo "$RELEASE_NOTES" | python3 -c "import json, sys; print(json.dumps(sys.stdin.read()))")
+            
+            # Create release using GitHub API
+            RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
+              -H "Accept: application/vnd.github+json" \
+              -H "Authorization: Bearer $GITHUB_TOKEN" \
+              -H "X-GitHub-Api-Version: 2022-11-28" \
+              -H "Content-Type: application/json" \
+              "https://api.github.com/repos/${REPO}/releases" \
+              -d "{
+                \"tag_name\": \"${RELEASE_TAG}\",
+                \"name\": \"${RELEASE_NAME}\",
+                \"body\": ${ESCAPED_NOTES},
+                \"target_commitish\": \"${BRANCH}\",
+                \"draft\": false,
+                \"prerelease\": false
+              }")
+            
+            HTTP_CODE=$(echo "$RESPONSE" | tail -n1)
+            BODY=$(echo "$RESPONSE" | sed '$d')
+            
+            if [ "$HTTP_CODE" -eq 201 ]; then
+              echo "Successfully created release $RELEASE_TAG for branch $BRANCH"
+            elif [ "$HTTP_CODE" -eq 422 ]; then
+              echo "Release $RELEASE_TAG already exists or validation failed"
+            else
+              echo "Failed to create release. HTTP code: $HTTP_CODE"
+              echo "Response: $BODY"
+              exit 1
+            fi
           fi
