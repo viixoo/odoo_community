@@ -154,7 +154,7 @@ jobs:
               TAG_DESC="Manual release"
             fi
             # Sanitize tag description: replace spaces and special chars with underscores, remove invalid chars
-            SANITIZED_TAG=$(echo "$TAG_DESC" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g' | sed 's/^_\|_$//g')
+            SANITIZED_TAG=$(echo "$TAG_DESC" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g' | sed -E 's/^_|_$//g')
             # Ensure sanitized tag is not empty
             if [ -z "$SANITIZED_TAG" ]; then
               SANITIZED_TAG="manual_release"
