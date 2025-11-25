@@ -19,13 +19,33 @@ on:
         required: false
         type: string
         default: 'Manual release'
-
 jobs:
+  prepare:
+    runs-on: ubuntu-latest
+    outputs:
+      branches: ${{ steps.set-branches.outputs.branches }}
+    steps:
+      - id: set-branches
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "branches=[\"${{ github.event.inputs.branch }}\"]" >> $GITHUB_OUTPUT
+          else
+            echo "branches=[\"17.0\", \"18.0\", \"19.0\"]" >> $GITHUB_OUTPUT
+          fi
+
   update-and-release:
+    needs: prepare
     runs-on: ubuntu-latest
     permissions:
       contents: write
       pull-requests: write
+    # Use matrix strategy to process all branches independently
+    # This guarantees all branches are processed even if one fails
+    strategy:
+      matrix:
+        branch: ${{ fromJSON(needs.prepare.outputs.branches) }}
+      fail-fast: false  # Continue processing other branches even if one fails
+      max-parallel: 3    # Process all branches in parallel
     
     steps:
       - name: Checkout repository
@@ -48,106 +68,106 @@ jobs:
           fi
           git fetch upstream
 
-      - name: Determine branches to process
-        id: branches
-        run: |
-          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
-            echo "branches=${{ github.event.inputs.branch }}" >> $GITHUB_OUTPUT
-          else
-            echo "branches=17.0 18.0 19.0" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Update branches and create releases
+      - name: Update branch and create release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          BRANCH: ${{ matrix.branch }}
         run: |
-          BRANCHES="${{ steps.branches.outputs.branches }}"
+          echo "Processing branch: $BRANCH"
           IS_MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
           
-          for BRANCH in $BRANCHES; do
-            echo "Processing branch: $BRANCH"
+          # Checkout the branch
+          git checkout $BRANCH 2>/dev/null || git checkout -b $BRANCH origin/$BRANCH 2>/dev/null || {
+            echo "Error: Could not checkout branch $BRANCH"
+            exit 1
+          }
+          
+          # Pull latest from upstream
+          git fetch upstream $BRANCH 2>/dev/null || {
+            echo "Error: Branch $BRANCH not found in upstream"
+            exit 1
+          }
+          
+          # Check if there are updates
+          UPSTREAM_COMMIT=$(git rev-parse upstream/$BRANCH 2>/dev/null || echo "")
+          CURRENT_COMMIT=$(git rev-parse HEAD)
+          
+          if [ -z "$UPSTREAM_COMMIT" ]; then
+            echo "Error: Branch $BRANCH not found in upstream"
+            exit 1
+          fi
+          
+          BRANCH_UPDATED=false
+          
+          if [ "$UPSTREAM_COMMIT" != "$CURRENT_COMMIT" ]; then
+            echo "Updating branch $BRANCH from upstream..."
             
-            # Checkout the branch
-            git checkout $BRANCH 2>/dev/null || git checkout -b $BRANCH origin/$BRANCH 2>/dev/null || {
-              echo "Could not checkout branch $BRANCH, skipping..."
-              continue
-            }
-            
-            # Pull latest from upstream
-            git fetch upstream $BRANCH 2>/dev/null || {
-              echo "Branch $BRANCH not found in upstream, skipping..."
-              continue
-            }
-            
-            # Check if there are updates
-            UPSTREAM_COMMIT=$(git rev-parse upstream/$BRANCH 2>/dev/null || echo "")
-            CURRENT_COMMIT=$(git rev-parse HEAD)
-            
-            if [ -z "$UPSTREAM_COMMIT" ]; then
-              echo "Branch $BRANCH not found in upstream, skipping..."
-              continue
-            fi
-            
-            BRANCH_UPDATED=false
-            
-            if [ "$UPSTREAM_COMMIT" != "$CURRENT_COMMIT" ]; then
-              echo "Updating branch $BRANCH from upstream..."
-              
-              # Merge upstream changes
-              if git merge upstream/$BRANCH --no-edit; then
-                # Push updated branch
-                if git push origin $BRANCH; then
-                  BRANCH_UPDATED=true
-                  echo "Branch $BRANCH updated successfully"
-                else
-                  echo "Push failed for branch $BRANCH"
-                fi
+            # Merge upstream changes
+            if git merge upstream/$BRANCH --no-edit; then
+              # Push updated branch
+              if git push origin $BRANCH; then
+                BRANCH_UPDATED=true
+                echo "Branch $BRANCH updated successfully"
               else
-                echo "Merge conflict detected, resetting to upstream..."
-                git merge --abort 2>/dev/null || true
-                git reset --hard upstream/$BRANCH
-                if git push origin $BRANCH --force; then
-                  BRANCH_UPDATED=true
-                  echo "Branch $BRANCH reset to upstream and pushed"
-                else
-                  echo "Force push failed for branch $BRANCH"
-                fi
+                echo "Error: Push failed for branch $BRANCH"
+                exit 1
               fi
             else
-              echo "Branch $BRANCH is already up to date"
+              echo "Merge conflict detected, resetting to upstream..."
+              git merge --abort 2>/dev/null || true
+              git reset --hard upstream/$BRANCH
+              if git push origin $BRANCH --force; then
+                BRANCH_UPDATED=true
+                echo "Branch $BRANCH reset to upstream and pushed"
+              else
+                echo "Error: Force push failed for branch $BRANCH"
+                exit 1
+              fi
             fi
+          else
+            echo "Branch $BRANCH is already up to date"
+          fi
+          
+          # Create release
+          if [ "$IS_MANUAL" == "true" ]; then
+            # Manual run: always create release with format branch_release_tag
+            TAG_DESC="${{ github.event.inputs.tag_description }}"
+            # Use default if empty
+            if [ -z "$TAG_DESC" ]; then
+              TAG_DESC="Manual release"
+            fi
+            # Sanitize tag description: replace spaces and special chars with underscores, remove invalid chars
+            SANITIZED_TAG=$(echo "$TAG_DESC" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g' | sed 's/^_\|_$//g')
+            # Ensure sanitized tag is not empty
+            if [ -z "$SANITIZED_TAG" ]; then
+              SANITIZED_TAG="manual_release"
+            fi
+            RELEASE_NAME="${BRANCH}_${SANITIZED_TAG}"
+            RELEASE_TAG="${BRANCH}_${SANITIZED_TAG}"
+            RELEASE_NOTES="Manual release for branch $BRANCH: $TAG_DESC"
+          elif [ "$BRANCH_UPDATED" == "true" ]; then
+            # Scheduled run: only create release if branch was updated, use date format
+            DATE=$(date +%Y%m%d)
+            RELEASE_NAME="${BRANCH}_${DATE}"
+            RELEASE_TAG="${BRANCH}_${DATE}"
+            RELEASE_NOTES="Automatic daily release for branch $BRANCH on $(date +%Y-%m-%d)"
+          else
+            echo "Skipping release creation for $BRANCH (no updates in scheduled run)"
+            exit 0
+          fi
+          
+          # Check if tag already exists
+          if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists, skipping release creation"
+          else
+            # Create tag and release
+            git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
+            git push origin "$RELEASE_TAG"
             
-            # Create release
-            if [ "$IS_MANUAL" == "true" ]; then
-              # Manual run: always create release with format branch_release_tag
-              TAG_DESC="${{ github.event.inputs.tag_description }}"
-              # Sanitize tag description: replace spaces and special chars with underscores, remove invalid chars
-              SANITIZED_TAG=$(echo "$TAG_DESC" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g' | sed 's/^_\|_$//g')
-              RELEASE_NAME="${BRANCH}_${SANITIZED_TAG}"
-              RELEASE_TAG="${BRANCH}_${SANITIZED_TAG}"
-              RELEASE_NOTES="Manual release for branch $BRANCH: $TAG_DESC"
-            elif [ "$BRANCH_UPDATED" == "true" ]; then
-              # Scheduled run: only create release if branch was updated, use date format
-              DATE=$(date +%Y%m%d)
-              RELEASE_NAME="${BRANCH}_${DATE}"
-              RELEASE_TAG="${BRANCH}_${DATE}"
-              RELEASE_NOTES="Automatic daily release for branch $BRANCH on $(date +%Y-%m-%d)"
-            else
-              echo "Skipping release creation for $BRANCH (no updates in scheduled run)"
-              continue
-            fi
+            gh release create "$RELEASE_TAG" \
+              --title "$RELEASE_NAME" \
+              --notes "$RELEASE_NOTES" \
+              --target $BRANCH || echo "Release creation failed or already exists"
             
-            # Check if tag already exists
-            if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
-              echo "Tag $RELEASE_TAG already exists, skipping release creation"
-            else
-              # Create tag and release
-              git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
-              git push origin "$RELEASE_TAG"
-              
-              gh release create "$RELEASE_TAG" \
-                --title "$RELEASE_NAME" \
-                --notes "$RELEASE_NOTES" \
-                --target $BRANCH || echo "Release creation failed or already exists"
-            fi
-          done
+            echo "Successfully created release $RELEASE_TAG for branch $BRANCH"
+          fi
