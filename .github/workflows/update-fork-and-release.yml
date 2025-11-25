@@ -77,6 +77,8 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.ODOO_GITHUB_TOKEN }}
           BRANCH: ${{ matrix.branch }}
           GITHUB_EVENT_NAME: ${{ github.event_name }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          TAG_DESCRIPTION: ${{ github.event.inputs.tag_description }}
         run: |
           echo "Processing branch: $BRANCH"
           # Check if this is a manual workflow dispatch
@@ -148,7 +150,7 @@ jobs:
           # Create release
           if [ "$IS_MANUAL" == "true" ]; then
             # Manual run: always create release with format branch_release_tag
-            TAG_DESC="${{ github.event.inputs.tag_description }}"
+            TAG_DESC="$TAG_DESCRIPTION"
             # Use default if empty
             if [ -z "$TAG_DESC" ]; then
               TAG_DESC="Manual release"
@@ -177,8 +179,8 @@ jobs:
             exit 0
           fi
           
-          # Get the repository name from GITHUB_REPOSITORY (format: owner/repo)
-          REPO="${{ github.repository }}"
+          # Get the repository name from environment variable (format: owner/repo)
+          REPO="$GITHUB_REPOSITORY"
           
           # Check if release already exists
           RELEASE_EXISTS=$(curl -s -o /dev/null -w "%{http_code}" \
