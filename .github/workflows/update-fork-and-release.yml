@@ -74,9 +74,15 @@ jobs:
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           BRANCH: ${{ matrix.branch }}
+          GITHUB_EVENT_NAME: ${{ github.event_name }}
         run: |
           echo "Processing branch: $BRANCH"
-          IS_MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
+          # Check if this is a manual workflow dispatch
+          if [ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]; then
+            IS_MANUAL="true"
+          else
+            IS_MANUAL="false"
+          fi
           
           # We're already on the correct branch from checkout step
           # Ensure we're on the branch (should already be there)
