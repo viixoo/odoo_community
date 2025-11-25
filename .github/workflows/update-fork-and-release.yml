@@ -194,13 +194,31 @@ jobs:
           TAG_EXISTS=false
           if git ls-remote --tags origin "$RELEASE_TAG" | grep -q "$RELEASE_TAG"; then
             TAG_EXISTS=true
-            echo "Tag $RELEASE_TAG already exists"
+            echo "Tag $RELEASE_TAG already exists on remote"
           else
             # Create tag
             # Tags only need the current commit, shallow clone is fine
-            git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
-            git push origin "$RELEASE_TAG"
-            echo "Created and pushed tag $RELEASE_TAG"
+            if ! git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"; then
+              echo "Error: Failed to create tag $RELEASE_TAG"
+              exit 1
+            fi
+            
+            # Push tag to remote and verify success
+            if ! git push origin "$RELEASE_TAG"; then
+              echo "Error: Failed to push tag $RELEASE_TAG to remote"
+              # Clean up local tag if push failed
+              git tag -d "$RELEASE_TAG" 2>/dev/null || true
+              exit 1
+            fi
+            
+            # Verify tag exists on remote before proceeding
+            if ! git ls-remote --tags origin "$RELEASE_TAG" | grep -q "$RELEASE_TAG"; then
+              echo "Error: Tag $RELEASE_TAG was pushed but not found on remote"
+              exit 1
+            fi
+            
+            echo "Successfully created and pushed tag $RELEASE_TAG"
+            TAG_EXISTS=true
           fi
           
           # Create release in the fork repository using GitHub API
