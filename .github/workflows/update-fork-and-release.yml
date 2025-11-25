@@ -1,0 +1,153 @@
+name: Update Fork and Create Release
+
+on:
+  schedule:
+    # Run daily at midnight UTC
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      branch:
+        description: 'Branch to update and release (e.g., 17.0, 18.0, 19.0)'
+        required: true
+        type: choice
+        options:
+          - '17.0'
+          - '18.0'
+          - '19.0'
+      tag_description:
+        description: 'Release tag description (used only in manual runs)'
+        required: false
+        type: string
+        default: 'Manual release'
+
+jobs:
+  update-and-release:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      pull-requests: write
+    
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Configure Git
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Add upstream remote
+        run: |
+          if ! git remote | grep -q upstream; then
+            git remote add upstream https://github.com/odoo/odoo.git
+          else
+            git remote set-url upstream https://github.com/odoo/odoo.git
+          fi
+          git fetch upstream
+
+      - name: Determine branches to process
+        id: branches
+        run: |
+          if [ "${{ github.event_name }}" == "workflow_dispatch" ]; then
+            echo "branches=${{ github.event.inputs.branch }}" >> $GITHUB_OUTPUT
+          else
+            echo "branches=17.0 18.0 19.0" >> $GITHUB_OUTPUT
+          fi
+
+      - name: Update branches and create releases
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCHES="${{ steps.branches.outputs.branches }}"
+          IS_MANUAL="${{ github.event_name == 'workflow_dispatch' }}"
+          
+          for BRANCH in $BRANCHES; do
+            echo "Processing branch: $BRANCH"
+            
+            # Checkout the branch
+            git checkout $BRANCH 2>/dev/null || git checkout -b $BRANCH origin/$BRANCH 2>/dev/null || {
+              echo "Could not checkout branch $BRANCH, skipping..."
+              continue
+            }
+            
+            # Pull latest from upstream
+            git fetch upstream $BRANCH 2>/dev/null || {
+              echo "Branch $BRANCH not found in upstream, skipping..."
+              continue
+            }
+            
+            # Check if there are updates
+            UPSTREAM_COMMIT=$(git rev-parse upstream/$BRANCH 2>/dev/null || echo "")
+            CURRENT_COMMIT=$(git rev-parse HEAD)
+            
+            if [ -z "$UPSTREAM_COMMIT" ]; then
+              echo "Branch $BRANCH not found in upstream, skipping..."
+              continue
+            fi
+            
+            BRANCH_UPDATED=false
+            
+            if [ "$UPSTREAM_COMMIT" != "$CURRENT_COMMIT" ]; then
+              echo "Updating branch $BRANCH from upstream..."
+              
+              # Merge upstream changes
+              if git merge upstream/$BRANCH --no-edit; then
+                # Push updated branch
+                if git push origin $BRANCH; then
+                  BRANCH_UPDATED=true
+                  echo "Branch $BRANCH updated successfully"
+                else
+                  echo "Push failed for branch $BRANCH"
+                fi
+              else
+                echo "Merge conflict detected, resetting to upstream..."
+                git merge --abort 2>/dev/null || true
+                git reset --hard upstream/$BRANCH
+                if git push origin $BRANCH --force; then
+                  BRANCH_UPDATED=true
+                  echo "Branch $BRANCH reset to upstream and pushed"
+                else
+                  echo "Force push failed for branch $BRANCH"
+                fi
+              fi
+            else
+              echo "Branch $BRANCH is already up to date"
+            fi
+            
+            # Create release
+            if [ "$IS_MANUAL" == "true" ]; then
+              # Manual run: always create release with format branch_release_tag
+              TAG_DESC="${{ github.event.inputs.tag_description }}"
+              # Sanitize tag description: replace spaces and special chars with underscores, remove invalid chars
+              SANITIZED_TAG=$(echo "$TAG_DESC" | sed 's/[^a-zA-Z0-9._-]/_/g' | sed 's/__*/_/g' | sed 's/^_\|_$//g')
+              RELEASE_NAME="${BRANCH}_${SANITIZED_TAG}"
+              RELEASE_TAG="${BRANCH}_${SANITIZED_TAG}"
+              RELEASE_NOTES="Manual release for branch $BRANCH: $TAG_DESC"
+            elif [ "$BRANCH_UPDATED" == "true" ]; then
+              # Scheduled run: only create release if branch was updated, use date format
+              DATE=$(date +%Y%m%d)
+              RELEASE_NAME="${BRANCH}_${DATE}"
+              RELEASE_TAG="${BRANCH}_${DATE}"
+              RELEASE_NOTES="Automatic daily release for branch $BRANCH on $(date +%Y-%m-%d)"
+            else
+              echo "Skipping release creation for $BRANCH (no updates in scheduled run)"
+              continue
+            fi
+            
+            # Check if tag already exists
+            if git rev-parse "$RELEASE_TAG" >/dev/null 2>&1; then
+              echo "Tag $RELEASE_TAG already exists, skipping release creation"
+            else
+              # Create tag and release
+              git tag -a "$RELEASE_TAG" -m "$RELEASE_NOTES"
+              git push origin "$RELEASE_TAG"
+              
+              gh release create "$RELEASE_TAG" \
+                --title "$RELEASE_NAME" \
+                --notes "$RELEASE_NOTES" \
+                --target $BRANCH || echo "Release creation failed or already exists"
+            fi
+          done
