@@ -222,8 +222,8 @@ jobs:
           fi
           
           # Create release in the fork repository using GitHub API
-          # Properly escape JSON using Python
-          ESCAPED_NOTES=$(echo "$RELEASE_NOTES" | python3 -c "import json, sys; print(json.dumps(sys.stdin.read()))")
+          # Properly escape JSON using Python (use printf to avoid trailing newline)
+          ESCAPED_NOTES=$(printf '%s' "$RELEASE_NOTES" | python3 -c "import json, sys; print(json.dumps(sys.stdin.read()))")
           
           # Create release using GitHub API
           RESPONSE=$(curl -s -w "\n%{http_code}" -X POST \
