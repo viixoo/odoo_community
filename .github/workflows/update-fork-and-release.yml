@@ -62,10 +62,13 @@ jobs:
         run: |
           git config user.name "$GITHUB_USER"
           git config user.email "$GITHUB_USER@users.noreply.github.com"
-          # URL-encode the token to handle special characters properly
-          ENCODED_TOKEN=$(python3 -c "import urllib.parse, sys; print(urllib.parse.quote(sys.argv[1], safe=''))" "$GITHUB_TOKEN")
-          # Configure remote URL with properly encoded token
-          git remote set-url origin "https://${GITHUB_USER}:${ENCODED_TOKEN}@github.com/${{ github.repository }}.git"
+          # Always set up credential helper for reliable authentication
+          git config credential.helper store
+          # Store credentials in the format: https://username:token@github.com
+          echo "https://${GITHUB_USER}:${GITHUB_TOKEN}@github.com" > "$HOME/.git-credentials"
+          chmod 600 "$HOME/.git-credentials"
+          # Ensure remote URL is clean (without embedded credentials)
+          git remote set-url origin "https://github.com/${{ github.repository }}.git"
 
       - name: Add upstream remote and fetch specific branch
         run: |
@@ -125,7 +128,8 @@ jobs:
             echo "Updating branch $BRANCH from upstream..."
             
             # Try to merge upstream changes (works for fast-forward merges with shallow clone)
-            if git merge upstream/$BRANCH --no-edit 2>&1; then
+            # Use --allow-unrelated-histories in case fork and upstream have diverged
+            if git merge upstream/$BRANCH --no-edit --allow-unrelated-histories 2>&1; then
               # Push updated branch
               if git push origin $BRANCH; then
                 BRANCH_UPDATED=true
@@ -135,7 +139,7 @@ jobs:
                 exit 1
               fi
             else
-              # Merge failed - could be due to shallow history or conflicts
+              # Merge failed - could be due to shallow history, conflicts, or unrelated histories
               # Reset to upstream (doesn't require full history)
               echo "Merge failed, resetting to upstream..."
               git merge --abort 2>/dev/null || true
