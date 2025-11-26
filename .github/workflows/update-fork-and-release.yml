@@ -204,8 +204,9 @@ jobs:
           fi
           
           # Check if tag already exists (check remote since we have shallow clone)
+          # git ls-remote returns refs in format: <commit>	refs/tags/tag-name
           TAG_EXISTS=false
-          if git ls-remote --tags origin "$RELEASE_TAG" | grep -Fq "$RELEASE_TAG"; then
+          if git ls-remote --tags origin | grep -Fq "refs/tags/$RELEASE_TAG$"; then
             TAG_EXISTS=true
             echo "Tag $RELEASE_TAG already exists on remote"
           else
@@ -225,7 +226,8 @@ jobs:
             fi
             
             # Verify tag exists on remote before proceeding
-            if ! git ls-remote --tags origin "$RELEASE_TAG" | grep -Fq "$RELEASE_TAG"; then
+            # git ls-remote returns refs in format: <commit>	refs/tags/tag-name
+            if ! git ls-remote --tags origin | grep -Fq "refs/tags/$RELEASE_TAG$"; then
               echo "Error: Tag $RELEASE_TAG was pushed but not found on remote"
               exit 1
             fi
